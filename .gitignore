@@ -1,0 +1,18 @@
+# Data files (Large binaries)
+data/raw_exams/
+data/processed_jsonl/
+data/intermediate/
+
+# Python artifacts
+**/__pycache__/
+*.pyc
+
+# Node.js
+**/node_modules/
+**/dist/
+
+# Env files
+.env*
+
+# Firebase logs
+**/firebase-debug.log
