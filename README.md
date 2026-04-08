@@ -7,9 +7,12 @@ This repository is a monorepo containing the full ecosystem for ITPE (Informatio
 - **`/apps`**: High-level applications.
   - **`quiz-app`**: A React + TypeScript + Firebase web application for students to practice exams.
 - **`/pipeline`**: Python-based data processing engine.
-  - **`extractors`**: Tools like `OpenDataLoader-PDF` for extracting data from official exam PDFs.
-  - **`processors`**: Scripts for categorizing, cropping, and formatting questions.
-  - **`utils`**: Shared image and layout utilities.
+  - **`extractors`**: 
+    - `generate_jsonl_v2.py`: Visual-first generator (crops questions/choices as images).
+  - **`processors`**: 
+    - `apply_categories_v2.py`: Maps questions to official ITPE syllabus categories.
+  - **`utils`**: 
+    - `pdf_to_images.py`: High-DPI PDF-to-JPG conversion.
 - **`/data`** (Git Ignored): Storage for raw and processed exam data.
   - **`raw_exams`**: Original ITPE PDF booklets.
   - **`processed_jsonl`**: Structured JSONL files containing question images and metadata.
