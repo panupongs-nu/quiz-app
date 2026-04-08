@@ -151,6 +151,7 @@ function App() {
     const result: QuizResult = {
       userId: user.uid,
       userName: user.displayName || user.email || 'Unknown',
+      userEmail: user.email || '',
       timestamp: serverTimestamp(),
       score: score,
       total: questions.length,

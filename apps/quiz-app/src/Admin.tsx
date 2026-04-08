@@ -1,8 +1,8 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { db, auth } from './firebase'
-import { collection, doc, writeBatch, query, limit, getDocs, deleteDoc } from 'firebase/firestore'
-import type { Question } from './types'
-import { Upload, ChevronLeft, Database, CheckCircle, AlertCircle, Search, Trash2, Eye, X, Plus, Download, Edit2 } from 'lucide-react'
+import { collection, doc, writeBatch, query, limit, getDocs, deleteDoc, orderBy } from 'firebase/firestore'
+import type { Question, QuizResult } from './types'
+import { Upload, ChevronLeft, Database, CheckCircle, AlertCircle, Search, Trash2, Eye, X, Plus, Download, Edit2, Users, BarChart3, Clock, TrendingUp } from 'lucide-react'
 import { setDoc } from 'firebase/firestore'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -15,7 +15,12 @@ interface AdminProps {
   onUploadSuccess?: () => void;
 }
 
+type AdminTab = 'DATABASE' | 'STUDENTS' | 'STATS';
+
 export default function Admin({ onBack, onUploadSuccess }: AdminProps) {
+  const [activeTab, setActiveTab] = useState<AdminTab>('DATABASE');
+  const [results, setResults] = useState<QuizResult[]>([]);
+  const [loadingResults, setLoadingResults] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [status, setStatus] = useState<{ type: 'success' | 'error', msg: string } | null>(null);
   const [stats, setStats] = useState({ total: 0, categories: [] as string[], sources: [] as string[] });
@@ -109,8 +114,26 @@ export default function Admin({ onBack, onUploadSuccess }: AdminProps) {
     }
   };
 
+  const loadResults = async () => {
+    setLoadingResults(true);
+    try {
+      const q = query(collection(db, "results"), orderBy("timestamp", "desc"), limit(1000));
+      const snapshot = await getDocs(q);
+      const fetchedResults: QuizResult[] = [];
+      snapshot.forEach(doc => {
+        fetchedResults.push(doc.data() as QuizResult);
+      });
+      setResults(fetchedResults);
+    } catch (err) {
+      console.error("Error loading results:", err);
+    } finally {
+      setLoadingResults(false);
+    }
+  };
+
   useEffect(() => {
     loadStats();
+    loadResults();
   }, []);
 
   const filteredQuestions = explorerQuestions.filter(q => {
@@ -122,6 +145,47 @@ export default function Admin({ onBack, onUploadSuccess }: AdminProps) {
     
     return matchesSearch && matchesSource && matchesCategory;
   });
+
+  const usageStats = useMemo(() => {
+    const totalQuizzes = results.length;
+    const avgScore = totalQuizzes > 0 ? (results.reduce((acc, curr) => acc + (curr.score / curr.total), 0) / totalQuizzes) * 100 : 0;
+    
+    const categoryPopularity: Record<string, number> = {};
+    const userStats: Record<string, { name: string, email: string, total: number, avgScore: number, lastActive: any }> = {};
+
+    results.forEach(res => {
+      // Category stats
+      res.topics?.forEach(topic => {
+        categoryPopularity[topic] = (categoryPopularity[topic] || 0) + 1;
+      });
+
+      // User stats
+      if (!userStats[res.userId]) {
+        userStats[res.userId] = { 
+          name: res.userName || "Unknown", 
+          email: res.userEmail || "No Email", 
+          total: 0, 
+          avgScore: 0,
+          lastActive: res.timestamp
+        };
+      }
+      userStats[res.userId].total += 1;
+      userStats[res.userId].avgScore += (res.score / res.total);
+      if (res.timestamp?.seconds > userStats[res.userId].lastActive?.seconds) {
+        userStats[res.userId].lastActive = res.timestamp;
+      }
+    });
+
+    return {
+      totalQuizzes,
+      avgScore,
+      categoryPopularity: Object.entries(categoryPopularity).sort((a, b) => b[1] - a[1]),
+      students: Object.values(userStats).map(u => ({
+        ...u,
+        avgScore: (u.avgScore / u.total) * 100
+      })).sort((a, b) => b.lastActive?.seconds - a.lastActive?.seconds)
+    };
+  }, [results]);
 
   if (auth.currentUser?.email !== 'panupongs@nu.ac.th') {
     return (
@@ -238,28 +302,53 @@ export default function Admin({ onBack, onUploadSuccess }: AdminProps) {
   };
 
   return (
-    <div className="bg-white p-6 rounded-2xl shadow-lg w-full">
-      <button 
-        onClick={onBack}
-        className="flex items-center gap-1 text-gray-500 hover:text-blue-600 mb-6 transition-colors"
-      >
-        <ChevronLeft size={20} />
-        <span>Back to Dashboard</span>
-      </button>
-
-      <div className="flex justify-between items-start mb-8">
-        <div>
-          <h2 className="text-2xl font-bold mb-2 flex items-center gap-2">
-            <Database className="text-blue-600" />
-            <span>Question Management</span>
-          </h2>
-          <p className="text-gray-500 text-sm">Upload JSONL files to update the practice database.</p>
+    <div className="w-full max-w-6xl mx-auto py-8 px-4">
+      {/* Header & Tabs */}
+      <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-6 mb-10">
+        <div className="flex items-center gap-4">
+          <button onClick={onBack} className="p-3 bg-white hover:bg-gray-50 rounded-2xl transition-all text-gray-600 shadow-sm border border-gray-100 group">
+            <ChevronLeft size={24} className="group-hover:-translate-x-1 transition-transform" />
+          </button>
+          <div>
+            <h1 className="text-3xl font-black text-gray-900 tracking-tight">Admin Console</h1>
+            <p className="text-gray-500 font-medium">Naresuan University ITPE Ecosystem</p>
+          </div>
         </div>
-        <div className="text-right">
-          <div className="text-xs font-bold text-gray-400 uppercase tracking-widest">Admin User</div>
-          <div className="text-sm font-medium text-blue-600">{auth.currentUser?.email}</div>
+
+        <div className="flex bg-gray-100 p-1.5 rounded-[1.25rem] shadow-inner w-full md:w-auto">
+          {[
+            { id: 'DATABASE' as AdminTab, label: 'Database', icon: Database },
+            { id: 'STUDENTS' as AdminTab, label: 'Students', icon: Users },
+            { id: 'STATS' as AdminTab, label: 'Stats', icon: BarChart3 },
+          ].map(tab => (
+            <button 
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id)}
+              className={`flex-1 md:flex-none flex items-center justify-center gap-2 px-6 py-2.5 rounded-xl font-bold transition-all ${activeTab === tab.id ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+            >
+              <tab.icon size={18} />
+              <span>{tab.label}</span>
+            </button>
+          ))}
         </div>
       </div>
+
+      {activeTab === 'DATABASE' && (
+        <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
+          <div className="bg-white p-8 rounded-3xl shadow-xl shadow-gray-200/50 border border-gray-100 mb-8">
+            <div className="flex justify-between items-start mb-8">
+              <div>
+                <h2 className="text-2xl font-bold mb-2 flex items-center gap-2 text-gray-800">
+                  <Database className="text-blue-600" />
+                  <span>Question Management</span>
+                </h2>
+                <p className="text-gray-500 text-sm">Upload and manage high-fidelity exam data.</p>
+              </div>
+              <div className="hidden sm:block text-right">
+                <div className="text-[10px] font-black text-gray-400 uppercase tracking-[0.2em] mb-1">Session Identity</div>
+                <div className="text-xs font-bold text-blue-600 bg-blue-50 px-3 py-1 rounded-full border border-blue-100">{auth.currentUser?.email}</div>
+              </div>
+            </div>
 
       <div className="flex items-center gap-4 mb-8">
         <label className="flex items-center gap-2 cursor-pointer bg-gray-100 px-4 py-3 rounded-xl hover:bg-gray-200 transition-colors">
@@ -493,6 +582,152 @@ export default function Admin({ onBack, onUploadSuccess }: AdminProps) {
           </div>
         </div>
       </div>
+    </div>
+  )}
+
+  {activeTab === 'STUDENTS' && (
+    <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
+      <div className="bg-white rounded-3xl shadow-xl shadow-gray-200/50 border border-gray-100 overflow-hidden">
+        <div className="p-8 border-b border-gray-100 bg-gray-50/50 flex justify-between items-center">
+          <div>
+            <h2 className="text-2xl font-bold text-gray-800">Student Roster</h2>
+            <p className="text-gray-500 text-sm">Overview of registered students and their performance.</p>
+          </div>
+          <div className="bg-white px-4 py-2 rounded-2xl shadow-sm border border-gray-100 text-sm font-bold text-gray-600">
+            Total: {usageStats.students.length} Students
+          </div>
+        </div>
+        
+        <div className="overflow-x-auto">
+          <table className="w-full text-left">
+            <thead className="bg-gray-50 text-[10px] font-black text-gray-400 uppercase tracking-[0.2em]">
+              <tr>
+                <th className="px-8 py-4">Student</th>
+                <th className="px-8 py-4">Quizzes</th>
+                <th className="px-8 py-4">Avg Score</th>
+                <th className="px-8 py-4">Last Activity</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-100">
+              {usageStats.students.map((student, i) => (
+                <tr key={i} className="hover:bg-blue-50/30 transition-colors group">
+                  <td className="px-8 py-5">
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 bg-gradient-to-br from-blue-500 to-indigo-600 rounded-xl flex items-center justify-center text-white font-bold shadow-md shadow-blue-100">
+                        {student.name.charAt(0)}
+                      </div>
+                      <div>
+                        <div className="font-bold text-gray-900">{student.name}</div>
+                        <div className="text-xs text-gray-500">{student.email}</div>
+                      </div>
+                    </div>
+                  </td>
+                  <td className="px-8 py-5 font-bold text-gray-700">{student.total} sessions</td>
+                  <td className="px-8 py-5">
+                    <div className="flex items-center gap-2">
+                      <div className="w-16 bg-gray-100 h-1.5 rounded-full overflow-hidden text-[0px]">.
+                        <div className="bg-blue-500 h-full" style={{ width: `${student.avgScore}%` }}></div>
+                      </div>
+                      <span className="text-sm font-black text-blue-600">{Math.round(student.avgScore)}%</span>
+                    </div>
+                  </td>
+                  <td className="px-8 py-5 text-sm text-gray-500 font-medium">
+                    <div className="flex items-center gap-2">
+                      <Clock size={14} />
+                      {student.lastActive ? new Date(student.lastActive.seconds * 1000).toLocaleDateString() : 'Never'}
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  )}
+
+  {activeTab === 'STATS' && (
+    <div className="animate-in fade-in slide-in-from-bottom-4 duration-500 space-y-8">
+      {/* Key Metrics */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+        <div className="bg-white p-8 rounded-3xl shadow-xl shadow-gray-200/50 border border-gray-100 flex items-center gap-6">
+          <div className="p-4 bg-blue-50 text-blue-600 rounded-2xl">
+            <TrendingUp size={32} />
+          </div>
+          <div>
+            <div className="text-3xl font-black text-gray-900">{usageStats.totalQuizzes}</div>
+            <div className="text-xs font-bold text-gray-400 uppercase tracking-widest">Quizzes Taken</div>
+          </div>
+        </div>
+        <div className="bg-white p-8 rounded-3xl shadow-xl shadow-gray-200/50 border border-gray-100 flex items-center gap-6">
+          <div className="p-4 bg-green-50 text-green-600 rounded-2xl">
+            <BarChart3 size={32} />
+          </div>
+          <div>
+            <div className="text-3xl font-black text-gray-900">{Math.round(usageStats.avgScore)}%</div>
+            <div className="text-xs font-bold text-gray-400 uppercase tracking-widest">Global Avg</div>
+          </div>
+        </div>
+        <div className="bg-white p-8 rounded-3xl shadow-xl shadow-gray-200/50 border border-gray-100 flex items-center gap-6">
+          <div className="p-4 bg-purple-50 text-purple-600 rounded-2xl">
+            <Database size={32} />
+          </div>
+          <div>
+            <div className="text-3xl font-black text-gray-900">{stats.total}</div>
+            <div className="text-xs font-bold text-gray-400 uppercase tracking-widest">Repo Questions</div>
+          </div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+        {/* Category Popularity */}
+        <div className="bg-white p-8 rounded-3xl shadow-xl shadow-gray-200/50 border border-gray-100">
+          <h3 className="text-xl font-bold text-gray-800 mb-6 flex items-center gap-2">
+            <Database size={20} className="text-blue-500" />
+            <span>Topic Hotspots</span>
+          </h3>
+          <div className="space-y-4">
+            {usageStats.categoryPopularity.map(([cat, count], i) => (
+              <div key={i}>
+                <div className="flex justify-between text-sm mb-1.5">
+                  <span className="font-bold text-gray-700 truncate max-w-[250px]">{cat}</span>
+                  <span className="text-blue-600 font-black">{count} sessions</span>
+                </div>
+                <div className="w-full bg-gray-50 h-3 rounded-full overflow-hidden border border-gray-100">
+                  <div 
+                    className="bg-blue-500 h-full rounded-full transition-all duration-1000" 
+                    style={{ width: `${(count / Math.max(1, usageStats.totalQuizzes)) * 100}%` }}
+                  ></div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Participation Log */}
+        <div className="bg-white p-8 rounded-3xl shadow-xl shadow-gray-200/50 border border-gray-100">
+          <h3 className="text-xl font-bold text-gray-800 mb-6 flex items-center gap-2">
+            <Clock size={20} className="text-indigo-500" />
+            <span>Recent Activity</span>
+          </h3>
+          <div className="space-y-6">
+            {results.slice(0, 8).map((res, i) => (
+              <div key={i} className="flex items-start gap-4 border-b border-gray-50 pb-4 last:border-0">
+                <div className="w-2 h-2 rounded-full bg-blue-500 mt-2"></div>
+                <div className="flex-1">
+                  <div className="flex justify-between items-start">
+                    <span className="font-bold text-gray-900">{res.userName}</span>
+                    <span className="text-[10px] font-black text-gray-400 uppercase tracking-tighter">{res.timestamp ? new Date(res.timestamp.seconds * 1000).toLocaleTimeString() : ''}</span>
+                  </div>
+                  <p className="text-xs text-gray-500 mt-0.5">Scored {res.score}/{res.total} in {res.topics?.length || 0} categories</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  )}
 
       {isEditing && (
         <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, zIndex: 9999, backgroundColor: 'rgba(0,0,0,0.75)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '1rem', backdropFilter: 'blur(4px)' }}>

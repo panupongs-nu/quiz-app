@@ -98,17 +98,21 @@ def main():
                 next_q_on_page = q_markers[i]
                 break
         
-        q_bottom_limit = next_q_on_page["bounding box"][3] if next_q_on_page else 0
+        # Bottom limit: next question top OR footer safe zone (60pt)
+        q_bottom_limit = next_q_on_page["bounding box"][3] if next_q_on_page else 60
         
         # 1. Collect all items that physically belong to this question block
         block_items = []
         for it in flat_items:
             if it.get("page number") == page_num and "bounding box" in it:
                 it_box = it["bounding box"]
-                # Vertical filter: Between this Q top and next Q top (allowing small margins)
+                # Vertical filter: Between this Q top and next Q top
                 if it_box[1] >= q_bottom_limit - 5 and it_box[3] <= q_top_limit + 5:
                     if it.get("type") not in ["header", "footer"]:
-                        block_items.append(it)
+                        # Exclude items that look like page numbers (e.g., "- 3 -" or "15")
+                        content = str(it.get("content", "")).strip()
+                        if not re.match(r"^–?\s*\d+\s*–?$", content):
+                            block_items.append(it)
         
         # 2. Identify the Choice Start Point (a) marker)
         split_y = None

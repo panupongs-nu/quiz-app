@@ -29,6 +29,7 @@ export interface Question {
 export interface QuizResult {
   userId: string;
   userName: string;
+  userEmail: string;
   timestamp: any;
   score: number;
   total: number;
