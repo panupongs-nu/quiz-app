@@ -12,7 +12,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'utils'))
 try:
     from image_utils import img_to_b64
 except ImportError:
-    # Fallback if pathing is weird
+    # Fallback
     def img_to_b64(img, format="PNG"):
         from io import BytesIO
         import base64
@@ -23,7 +23,6 @@ except ImportError:
 def get_answers(answers_path):
     answers = {}
     if not os.path.exists(answers_path):
-        print(f"Warning: Answers file {answers_path} not found.")
         return answers
     with open(answers_path, 'r') as f:
         for line in f:
@@ -42,171 +41,136 @@ def flatten_json(items, result=None):
         for i in items: flatten_json(i, result)
     return result
 
+def get_bbox(items):
+    valid = [it for it in items if "bounding box" in it and len(it["bounding box"]) == 4]
+    if not valid: return None
+    return [
+        min(it["bounding box"][0] for it in valid),
+        min(it["bounding box"][1] for it in valid),
+        max(it["bounding box"][2] for it in valid),
+        max(it["bounding box"][3] for it in valid)
+    ]
+
 def main():
-    parser = argparse.ArgumentParser(description="Generate JSONL from OpenDataLoader JSON and PDF pages.")
-    parser.add_argument("--year", required=True, help="Exam identifier (e.g., 2025S)")
-    parser.add_argument("--json", required=True, help="Path to OpenDataLoader JSON output")
-    parser.add_argument("--answers", required=True, help="Path to cleaned answers text file")
-    parser.add_argument("--pages_dir", required=True, help="Directory containing page-XX.jpg images")
-    parser.add_argument("--output", required=True, help="Path to save the output JSONL file")
-    parser.add_argument("--source_name", default=None, help="Formal source name for metadata")
-    
+    parser = argparse.ArgumentParser(description="Generate JSONL using coordinate-based structural analysis.")
+    parser.add_argument("--year", required=True)
+    parser.add_argument("--json", required=True)
+    parser.add_argument("--answers", required=True)
+    parser.add_argument("--pages_dir", required=True)
+    parser.add_argument("--output", required=True)
+    parser.add_argument("--source_name", default=None)
     args = parser.parse_args()
     
-    if not os.path.exists(args.json):
-        print(f"Error: JSON file {args.json} not found.")
-        return
-    
-    with open(args.json, 'r') as f:
-        data = json.load(f)
-    
+    if not os.path.exists(args.json): return
+    with open(args.json, 'r') as f: data = json.load(f)
     all_answers = get_answers(args.answers)
     source_label = args.source_name or f"IT Passport {args.year}"
     
-    # 1. Flatten the entire document
     flat_items = flatten_json(data["kids"])
     
-    # 2. Identify Question Start Indices (Skipping Page 1/2)
-    q_indices = []
-    for i, item in enumerate(flat_items):
-        content = str(item.get("content", ""))
-        # Match Q1. Q2. etc.
-        if re.match(r"^Q\d+\.", content) and item.get("page number", 0) >= 3:
-            q_indices.append(i)
-            
-    final_questions = []
-    print(f"Found {len(q_indices)} questions in {args.year}")
+    # Identify All Question Markers (Q1., Q2., etc.)
+    q_markers = []
+    for it in flat_items:
+        content = str(it.get("content", ""))
+        if re.match(r"^Q\d+\.", content) and it.get("page number", 0) >= 3:
+            q_markers.append(it)
     
-    for idx, start_idx in enumerate(q_indices):
-        end_idx = q_indices[idx+1] if idx+1 < len(q_indices) else len(flat_items)
-        
-        # Everything between this Q and the next is part of this question
-        block_items = [it for it in flat_items[start_idx:end_idx] if it.get("type") != "footer"]
-        
-        # Get Q number and ID
-        q_item = flat_items[start_idx]
-        q_match = re.match(r"^Q(\d+)\.", q_item["content"])
-        if not q_match: continue
-        
-        q_num = int(q_match.group(1))
+    # Calculate Page Height per page (if it varies, otherwise assume A4)
+    page_heights = {}
+    for it in flat_items:
+        p = it.get("page number")
+        if p and "bounding box" in it:
+            page_heights[p] = max(page_heights.get(p, 841.89), it["bounding box"][3])
+
+    final_questions = []
+    print(f"Analyzing {len(q_markers)} questions for {args.year} using coordinate bounds...")
+    
+    for idx, q_marker in enumerate(q_markers):
+        q_num = int(re.match(r"^Q(\d+)\.", q_marker["content"]).group(1))
+        page_num = q_marker["page number"]
         q_id = f"{args.year}-Q-{q_num:03d}"
-        page_num = q_item["page number"]
+        q_top_limit = q_marker["bounding box"][3]
         
-        # Load the page image
+        # Find the next question on the SAME page to establish the bottom limit
+        next_q_on_page = None
+        for i in range(idx + 1, len(q_markers)):
+            if q_markers[i]["page number"] == page_num:
+                next_q_on_page = q_markers[i]
+                break
+        
+        q_bottom_limit = next_q_on_page["bounding box"][3] if next_q_on_page else 0
+        
+        # 1. Collect all items that physically belong to this question block
+        block_items = []
+        for it in flat_items:
+            if it.get("page number") == page_num and "bounding box" in it:
+                it_box = it["bounding box"]
+                # Vertical filter: Between this Q top and next Q top (allowing small margins)
+                if it_box[1] >= q_bottom_limit - 5 and it_box[3] <= q_top_limit + 5:
+                    if it.get("type") not in ["header", "footer"]:
+                        block_items.append(it)
+        
+        # 2. Identify the Choice Start Point (a) marker)
+        split_y = None
+        for it in block_items:
+            content = str(it.get("content", ""))
+            if re.match(r'^\s*[a-d][\)\.]', content):
+                # The top of the choices section is defined by the top of the first choice marker
+                if split_y is None or it["bounding box"][3] > split_y:
+                    split_y = it["bounding box"][3]
+        
+        # 3. Partition block items into Question part and Choice part
+        if split_y is None:
+            question_items = block_items
+            choice_items = []
+        else:
+            # Shift split_y slightly up to include the choice marker itself in choices
+            question_items = [it for it in block_items if it["bounding box"][1] >= split_y - 2]
+            choice_items = [it for it in block_items if it["bounding box"][1] < split_y - 2]
+        
+        # 4. Generate Bboxes and Crops
         page_img_path = os.path.join(args.pages_dir, f"page-{page_num:02d}.jpg")
-        if not os.path.exists(page_img_path):
-            print(f"Warning: Page image {page_img_path} not found for {q_id}")
-            continue
-            
+        if not os.path.exists(page_img_path): continue
         page_img = Image.open(page_img_path)
         p_w, p_h = page_img.size
+        pdf_h = page_heights.get(page_num, 841.89)
         
-        # Identify Split Point (First Choice marker a) b) c) d) )
-        split_y = None
-        choice_items = []
-        found_choices = False
-        
-        for it in block_items:
-            content = it.get("content", "")
-            is_c = re.match(r'^\s*[a-d][\)\.]', content)
-            
-            if is_c:
-                found_choices = True
-                if "bounding box" in it:
-                    y_top = it["bounding box"][3] # top coord in PDF
-                    if split_y is None or y_top > split_y:
-                        split_y = y_top
-            
-            if found_choices:
-                choice_items.append(it)
-        
-        # Calculate Bounding Boxes in PDF coordinates
-        def get_bbox(items):
-            valid = [it for it in items if "bounding box" in it and len(it["bounding box"]) == 4]
-            if not valid: return None
-            return [
-                min(it["bounding box"][0] for it in valid),
-                min(it["bounding box"][1] for it in valid),
-                max(it["bounding box"][2] for it in valid),
-                max(it["bounding box"][3] for it in valid)
-            ]
-            
-        q_bbox_pdf = get_bbox([it for it in block_items if it not in choice_items])
-        c_bbox_pdf = get_bbox(choice_items)
-        
-        # PDF box is [L, B, R, T] where (0,0) is bottom-left. 
-        # Image box is [L, T, R, B] where (0,0) is top-left.
-        # OpenDataLoader PDF height is usually 841.89 (A4) or 792 (Letter)
-        # We need the page height in PDF units to flip Y
-        # We'll assume the bounding box of the page or just use the max T found.
-        # Actually, let's use a safer relative mapping.
-        
-        # Determine PDF page height from content if not explicitly in JSON
-        # Usually it's in data["kids"] if we look for page type
-        pdf_h = 841.89 # Default A4
-        for it in flat_items:
-            if "bounding box" in it:
-                pdf_h = max(pdf_h, it["bounding box"][3])
-        
-        def pdf_to_img_box(pdf_box):
+        def to_img(pdf_box):
             if not pdf_box: return None
             l, b, r, t = pdf_box
-            # Flip Y: img_top = (pdf_h - pdf_top) * scale
-            # We need to calculate scale based on actual image pixels
-            scale_x = p_w / 595.27 # PDF width A4
-            scale_y = p_h / pdf_h
-            
-            # Use found content bounds for scale_x if 595.27 is wrong
-            # But ITPE is usually A4.
-            
-            return [
-                int(l * scale_x) - 10,
-                int((pdf_h - t) * scale_y) - 10,
-                int(r * scale_x) + 10,
-                int((pdf_h - b) * scale_y) + 10
+            sx, sy = p_w / 595.27, p_h / pdf_h
+            # Clamp to page bounds with 10px padding
+            pad = 10
+            box = [
+                max(0, int(l * sx) - pad),
+                max(0, int((pdf_h - t) * sy) - pad),
+                min(p_w, int(r * sx) + pad),
+                min(p_h, int((pdf_h - b) * sy) + pad)
             ]
-            
-        q_img_box = pdf_to_img_box(q_bbox_pdf)
-        c_img_box = pdf_to_img_box(c_bbox_pdf)
+            if box[2] <= box[0] or box[3] <= box[1]: return None
+            return box
+
+        q_img_box = to_img(get_bbox(question_items))
+        c_img_box = to_img(get_bbox(choice_items))
         
         media = []
         if q_img_box:
-            # Clamp to image size
-            q_img_box = [max(0, q_img_box[0]), max(0, q_img_box[1]), min(p_w, q_img_box[2]), min(p_h, q_img_box[3])]
-            q_crop = page_img.crop(q_img_box)
             media.append({
-                "type": "image",
-                "label": "Question",
-                "base64": f"data:image/png;base64,{img_to_b64(q_crop)}"
+                "type": "image", "label": "Question",
+                "base64": f"data:image/png;base64,{img_to_b64(page_img.crop(q_img_box))}"
             })
-            
         if c_img_box:
-            c_img_box = [max(0, c_img_box[0]), max(0, c_img_box[1]), min(p_w, c_img_box[2]), min(p_h, c_img_box[3])]
-            c_crop = page_img.crop(c_img_box)
             media.append({
-                "type": "image",
-                "label": "Choices",
-                "base64": f"data:image/png;base64,{img_to_b64(c_crop)}"
+                "type": "image", "label": "Choices",
+                "base64": f"data:image/png;base64,{img_to_b64(page_img.crop(c_img_box))}"
             })
             
         final_questions.append({
             "id": q_id,
-            "metadata": {
-                "topic": "General",
-                "major_category": "Pending Categorization",
-                "source": source_label,
-                "page": page_num
-            },
+            "metadata": {"topic": "General", "major_category": "Pending", "source": source_label, "page": page_num},
             "content": {
-                "question_text": "",
-                "choices": {
-                    "a": "See Diagram (A)",
-                    "b": "See Diagram (B)",
-                    "c": "See Diagram (C)",
-                    "d": "See Diagram (D)"
-                },
-                "has_media": True,
-                "media": media
+                "question_text": "", "has_media": True, "media": media,
+                "choices": {"a": "See Diagram (A)", "b": "See Diagram (B)", "c": "See Diagram (C)", "d": "See Diagram (D)"}
             },
             "feedback": {
                 "correct_answer": all_answers.get(q_num, "a"),
@@ -215,10 +179,7 @@ def main():
         })
 
     with open(args.output, 'w', encoding='utf-8') as f:
-        for q in final_questions:
-            f.write(json.dumps(q) + '\n')
-            
-    print(f"Successfully generated {len(final_questions)} questions in {args.output}")
+        for q in final_questions: f.write(json.dumps(q) + '\n')
+    print(f"Generated {len(final_questions)} questions in {args.output}")
 
-if __name__ == "__main__":
-    main()
+if __name__ == "__main__": main()
